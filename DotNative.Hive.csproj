@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net9.0;net10.0</TargetFrameworks>
+    <TargetFrameworks
+      Condition="'$(NETCoreSdkVersion)' != '' and $([MSBuild]::VersionLessThan('$(NETCoreSdkVersion)', '10.0.100'))"
+      >net9.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Version>0.1.0-preview.1</Version>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Description>Named local boxes with optional AES-256, shaped like Hive.</Description>
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference
+      Include="Microsoft.Extensions.DependencyInjection.Abstractions"
+      Version="9.0.0"
+    />
+    <None Remove="README.md;ORIGIN.md;LICENSE" />
+    <None Include="README.md;ORIGIN.md;LICENSE" Pack="true" PackagePath="%(Identity)" />
+  </ItemGroup>
+</Project>
