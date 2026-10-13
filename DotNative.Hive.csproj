@@ -6,6 +6,7 @@
       >net9.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <DotNativePluginKind>Managed</DotNativePluginKind>
     <IsAotCompatible>true</IsAotCompatible>
     <Version>0.1.0-preview.1</Version>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -21,4 +22,6 @@
     <None Remove="README.md;ORIGIN.md;LICENSE" />
     <None Include="README.md;ORIGIN.md;LICENSE" Pack="true" PackagePath="%(Identity)" />
   </ItemGroup>
+  <Import Project="build/PluginAuthoring.props" />
+  <Import Project="build/PluginAuthoring.targets" />
 </Project>

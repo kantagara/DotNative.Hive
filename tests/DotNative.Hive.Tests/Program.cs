@@ -36,7 +36,59 @@ try
 
     Throws(() => store.OpenBoxAsync("..").GetAwaiter().GetResult());
     Throws(() => store.OpenBoxAsync("user", new byte[16]).GetAwaiter().GetResult());
-    Console.WriteLine("PASS hive boxes");
+    var legacy = Path.Combine(root, "legacy");
+    Directory.CreateDirectory(legacy);
+    var legacyFile = Path.Combine(legacy, HiveKeys.Hash("old-user") + ".json");
+    File.WriteAllText(legacyFile, "{\"Name\":\"Legacy\",\"Year\":42}");
+    using (var migrated = await store.OpenBoxAsync("migrated"))
+    {
+        await migrated.ImportLegacyJsonAsync("profile", legacy, "old-user", PersonContext.Default.Person);
+        Require(migrated.Get("profile", PersonContext.Default.Person)?.Name == "Legacy");
+        migrated.Put("profile", new Person("New", 1), PersonContext.Default.Person);
+        await migrated.ImportLegacyJsonAsync("profile", legacy, "old-user", PersonContext.Default.Person);
+        Require(migrated.Get("profile", PersonContext.Default.Person)?.Name == "New" && File.Exists(legacyFile));
+    }
+    File.WriteAllText(Path.Combine(root, "broken.box"), "broken");
+    await ThrowsAsync(() => store.OpenBoxAsync("broken"));
+    var recovering = new HiveStore(root, recoverCorruptBoxes: true);
+    using (var recovered = await recovering.OpenBoxAsync("broken"))
+    {
+        Require(recovered.Keys.Count == 0);
+        recovered.Put("ok", "recovered"u8);
+    }
+    Require(Directory.GetFiles(root, "broken.box.corrupt-*").Length == 1);
+    // Recovery must never discard encrypted data because a key was omitted.
+    await ThrowsAsync(() => recovering.OpenBoxAsync("user"));
+
+    using (var rollback = await store.OpenBoxAsync("rollback"))
+    {
+        rollback.Put("keep", "old"u8);
+        var file = Path.Combine(root, "rollback.box");
+        File.Move(file, file + ".backup");
+        Directory.CreateDirectory(file); // Force the atomic rename to fail.
+        try
+        {
+            try { rollback.Put("keep", "new"u8); throw new Exception("Write unexpectedly succeeded"); }
+            catch (IOException) { }
+            Require(Encoding.UTF8.GetString(rollback.Get("keep")!) == "old");
+            try { rollback.Delete("keep"); throw new Exception("Delete unexpectedly succeeded"); }
+            catch (IOException) { }
+            Require(rollback.ContainsKey("keep"));
+            try { rollback.Clear(); throw new Exception("Clear unexpectedly succeeded"); }
+            catch (IOException) { }
+            Require(rollback.ContainsKey("keep"));
+        }
+        finally { Directory.Delete(file); File.Move(file + ".backup", file); }
+    }
+    Require(Directory.GetFiles(root, "*.tmp").Length == 0);
+    using (var cancelled = new CancellationTokenSource())
+    {
+        cancelled.Cancel();
+        try { await store.OpenBoxAsync("cancelled", cancellationToken: cancelled.Token); throw new Exception("Ignored cancellation"); }
+        catch (OperationCanceledException) { }
+        Require(!File.Exists(Path.Combine(root, "cancelled.box")));
+    }
+    Console.WriteLine("PASS hive boxes, JSON migration, corruption recovery and atomic-write rollback");
 }
 finally
 {

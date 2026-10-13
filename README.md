@@ -34,3 +34,37 @@ not NativeAOT-safe, and its database is a different file.
 Register `AddHive(directory)` before building the provider. `directory` is a
 full path. `services.Hive` is the C# 14 property on `net10.0`.
 `services.Hive()` is the method on `net9.0`.
+
+
+## Persistent cache integration
+
+This is an independent managed plugin. `dotnative/plugin.json` is included in the
+NuGet package; no sample or UI runtime dependency is required. JSON payloads use
+source-generated `JsonTypeInfo<T>` for NativeAOT. Box IO is synchronous even though
+opening returns a Task; invoke it on a worker when using a UI thread.
+
+Writes flush a unique temporary file before atomic replacement. A failed `Put`,
+`Delete` or `Clear` restores the in-memory state as well. Durability across power
+loss still depends on the filesystem. Use one `HiveStore` per directory; independent
+stores/processes do not coordinate read-modify-write operations.
+
+`AddHive(directory, recoverCorruptBoxes: true)` optionally quarantines corrupt
+plaintext boxes as `.box.corrupt-<id>` and creates empty replacements. The default
+remains strict. Encrypted boxes are never reset for a missing/mismatched key.
+
+`IHiveBox.ImportLegacyJsonAsync` imports a SHA-256-named JSON file only when the
+destination key is absent. It validates with the supplied `JsonTypeInfo<T>`, keeps
+the source for rollback, and limits imported files to 16 MiB. The caller serializes
+migration with writes to that key. `HiveKeys.Hash` supplies the stable filename hash.
+This is a migration helper, not Flutter Hive binary-file compatibility.
+
+App code owns schemas, account scoping, TTL, eviction, offline merge rules and retry
+logic. These do not belong to the storage plugin. Plaintext chat caches need no
+key; credentials belong in secure storage.
+
+Build/test/package locally:
+
+```sh
+dotnet run --project tests/DotNative.Hive.Tests
+dotnet pack DotNative.Hive.csproj -c Release -o artifacts
+```

@@ -31,16 +31,18 @@ public interface IHiveBox : IDisposable
 public sealed class HiveStore : IHive
 {
     private readonly string root;
+    private readonly bool recoverCorruptBoxes;
     private readonly object gate = new();
     private readonly Dictionary<string, HiveBox> open = new(StringComparer.Ordinal);
 
-    public HiveStore(string directory)
+    public HiveStore(string directory, bool recoverCorruptBoxes = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (!Path.IsPathFullyQualified(directory))
             throw new ArgumentException("Box directory must be a full path.", nameof(directory));
         Directory.CreateDirectory(directory);
         root = directory;
+        this.recoverCorruptBoxes = recoverCorruptBoxes;
     }
 
     public Task<IHiveBox> OpenBoxAsync(
@@ -58,13 +60,31 @@ public sealed class HiveStore : IHive
         {
             if (open.TryGetValue(safe, out var existing))
             {
-                existing.Retain(key);
-                return Task.FromResult<IHiveBox>(existing);
+                if (existing.TryRetain(key))
+                    return Task.FromResult<IHiveBox>(existing);
+                open.Remove(safe);
             }
-            var box = HiveBox.Open(this, safe, Path.Combine(root, safe + ".box"), key);
+            var path = Path.Combine(root, safe + ".box");
+            HiveBox box;
+            try
+            {
+                box = HiveBox.Open(this, safe, path, key);
+            }
+            catch (InvalidDataException) when (recoverCorruptBoxes && key is null && !HasEncryptedHeader(path))
+            {
+                File.Move(path, path + ".corrupt-" + Guid.NewGuid().ToString("N"));
+                box = HiveBox.Open(this, safe, path, key);
+            }
             open[safe] = box;
             return Task.FromResult<IHiveBox>(box);
         }
+    }
+
+    private static bool HasEncryptedHeader(string path)
+    {
+        using var file = File.OpenRead(path);
+        Span<byte> header = stackalloc byte[6];
+        return file.Read(header) == 6 && header[..4].SequenceEqual("DNHV"u8) && header[5] == 1;
     }
 
     internal void Release(string name, HiveBox box)
@@ -124,15 +144,16 @@ internal sealed class HiveBox : IHiveBox
         return box;
     }
 
-    public void Retain(byte[]? otherKey)
+    public bool TryRetain(byte[]? otherKey)
     {
-        if (!KeysEqual(key, otherKey))
-            throw new InvalidDataException("Box is already open with a different key.");
         lock (gate)
         {
             if (disposed)
-                throw new ObjectDisposedException(nameof(IHiveBox));
+                return false;
+            if (!KeysEqual(key, otherKey))
+                throw new InvalidDataException("Box is already open with a different key.");
             references++;
+            return true;
         }
     }
 
@@ -146,8 +167,15 @@ internal sealed class HiveBox : IHiveBox
             EnsureOpen();
             if (!entries.ContainsKey(key) && entries.Count >= MaxEntries)
                 throw new InvalidOperationException("Box entry limit reached.");
+            var existed = entries.TryGetValue(key, out var previous);
             entries[key] = value.ToArray();
-            Write();
+            try { Write(); }
+            catch
+            {
+                if (existed) entries[key] = previous!;
+                else entries.Remove(key);
+                throw;
+            }
         }
     }
 
@@ -167,9 +195,10 @@ internal sealed class HiveBox : IHiveBox
         lock (gate)
         {
             EnsureOpen();
-            if (!entries.Remove(key))
+            if (!entries.Remove(key, out var previous))
                 return false;
-            Write();
+            try { Write(); }
+            catch { entries[key] = previous; throw; }
             return true;
         }
     }
@@ -203,8 +232,14 @@ internal sealed class HiveBox : IHiveBox
             EnsureOpen();
             if (entries.Count == 0)
                 return;
+            var previous = entries.ToArray();
             entries.Clear();
-            Write();
+            try { Write(); }
+            catch
+            {
+                foreach (var item in previous) entries.Add(item.Key, item.Value);
+                throw;
+            }
         }
     }
 
@@ -305,9 +340,22 @@ internal sealed class HiveBox : IHiveBox
                 WriteBlob(stream, entryValue);
             }
         }
-        var temporary = path + ".tmp";
-        File.WriteAllBytes(temporary, stream.ToArray());
-        File.Move(temporary, path, overwrite: true);
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                4096, FileOptions.WriteThrough))
+            {
+                stream.Position = 0;
+                stream.CopyTo(file);
+                file.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
     }
 
     private static int ReadInt(byte[] bytes, ref int cursor)
@@ -386,10 +434,10 @@ internal static class HiveCipher
 
 public static class HiveServices
 {
-    public static IServiceCollection AddHive(this IServiceCollection services, string directory)
+    public static IServiceCollection AddHive(this IServiceCollection services, string directory, bool recoverCorruptBoxes = false)
     {
         ArgumentNullException.ThrowIfNull(services);
-        services.TryAddSingleton<IHive>(_ => new HiveStore(directory));
+        services.TryAddSingleton<IHive>(_ => new HiveStore(directory, recoverCorruptBoxes));
         return services;
     }
 }
